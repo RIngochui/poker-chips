@@ -188,12 +188,15 @@ function Lobby({
                 type="checkbox"
                 checked={table.settings.blindIncrease !== null}
                 disabled={!isHost}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const handLimit = table.settings.handLimit
+                  const everyHands =
+                    handLimit !== null ? Math.max(1, Math.floor(handLimit / 2)) : 5
                   setSetting(
                     'blindIncrease',
-                    e.target.checked ? { amount: 1, everyHands: 10 } : null,
+                    e.target.checked ? { amount: 1, everyHands } : null,
                   )
-                }
+                }}
                 className="h-4 w-4 disabled:opacity-50"
               />
               <span className="text-sm text-gray-500">

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   cancelAward,
+  computeBlindSeats,
   confirmAward,
   dealNextStreet,
   leaveTable,
@@ -45,8 +46,9 @@ function ActiveGame({
 }) {
   const sorted = [...players].sort((a, b) => a.seat - b.seat)
   const active = sorted.filter((p) => p.status === 'active')
-  const maxCommitted = Math.max(0, ...active.map((p) => p.committed))
   const contenders = active.filter((p) => !p.folded)
+  const maxCommitted = Math.max(0, ...contenders.map((p) => p.committed))
+  const { sbSeat, bbSeat } = computeBlindSeats(active, table.buttonSeat)
   const raiseLimit = table.settings.raiseLimit
   const pending = table.pendingAward
   const awaitingNextStreet =
@@ -107,6 +109,8 @@ function ActiveGame({
             code={code}
             player={p}
             isButton={p.seat === table.buttonSeat}
+            isSB={p.seat === sbSeat}
+            isBB={p.seat === bbSeat}
             isYou={p.uid === uid}
             isTurn={table.handInProgress && p.seat === table.actingSeat}
             callAmount={Math.max(0, maxCommitted - p.committed)}
@@ -259,6 +263,8 @@ function PlayerRow({
   code,
   player,
   isButton,
+  isSB,
+  isBB,
   isYou,
   isTurn,
   callAmount,
@@ -269,6 +275,8 @@ function PlayerRow({
   code: string
   player: Player
   isButton: boolean
+  isSB: boolean
+  isBB: boolean
   isYou: boolean
   isTurn: boolean
   callAmount: number
@@ -289,8 +297,9 @@ function PlayerRow({
     }
   }
 
-  const canAct = handInProgress && player.status === 'active' && !player.folded && isTurn
-  const isBusted = player.stack === 0
+  const canAct =
+    handInProgress && player.status === 'active' && !player.folded && isTurn && isYou
+  const isBusted = player.status === 'busted'
 
   return (
     <div
@@ -304,9 +313,14 @@ function PlayerRow({
             {player.name}
             {isYou && <span className="ml-2 text-xs text-indigo-500">(you)</span>}
             {isButton && <span className="ml-2 text-xs text-amber-600">D</span>}
+            {isSB && <span className="ml-2 text-xs text-sky-600">SB</span>}
+            {isBB && <span className="ml-2 text-xs text-sky-600">BB</span>}
             {player.folded && <span className="ml-2 text-xs text-gray-400">folded</span>}
             {player.status === 'busted' && (
               <span className="ml-2 text-xs text-rose-500">busted — rebuy to rejoin</span>
+            )}
+            {player.status === 'left' && (
+              <span className="ml-2 text-xs text-gray-400">left the game</span>
             )}
             {isTurn && <span className="ml-2 text-xs text-indigo-600">to act</span>}
           </span>
@@ -398,7 +412,7 @@ function PlayerRow({
         </div>
       )}
 
-      {isBusted && (
+      {isBusted && isYou && (
         <div className="mt-3 space-y-2 border-t border-gray-100 pt-3">
           <div className="flex flex-wrap items-center gap-2">
             {CHIP_INCREMENTS.map((inc) => (
@@ -418,21 +432,40 @@ function PlayerRow({
               className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
             />
           </div>
-          <button
-            type="button"
-            onClick={() =>
-              act(async () => {
-                if (buyInAmount > 0) {
-                  await recordBuyIn(code, player.uid, buyInAmount, actorUid!, 'rebuy')
-                }
-                setBuyInAmount(0)
-              })
-            }
-            disabled={buyInAmount <= 0}
-            className="rounded-md border border-emerald-300 px-3 py-1 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-          >
-            Rebuy {buyInAmount > 0 ? buyInAmount : ''}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                act(async () => {
+                  if (buyInAmount > 0) {
+                    await recordBuyIn(code, player.uid, buyInAmount, actorUid!, 'rebuy')
+                  }
+                  setBuyInAmount(0)
+                })
+              }
+              disabled={buyInAmount <= 0}
+              className="rounded-md border border-emerald-300 px-3 py-1 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+            >
+              Rebuy {buyInAmount > 0 ? buyInAmount : ''}
+            </button>
+            <button
+              type="button"
+              onClick={() => act(() => leaveTable(code, player.uid, player.uid))}
+              disabled={handInProgress}
+              title={handInProgress ? 'Finish the current hand first' : undefined}
+              className="rounded-md border border-gray-300 px-3 py-1 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+            >
+              Drop off
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isBusted && !isYou && (
+        <div className="mt-3 border-t border-gray-100 pt-3">
+          <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-400">
+            Inactive — waiting on rebuy
+          </span>
         </div>
       )}
     </div>

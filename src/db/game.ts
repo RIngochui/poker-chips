@@ -56,13 +56,17 @@ export function computeBlindSeats(
   const seats = activeSeats(players)
   if (seats.length < 2) return { sbSeat: buttonSeat, bbSeat: buttonSeat }
 
+  // The seat that held the button might belong to someone who's since
+  // busted out or dropped off — fall back to the first remaining seat.
+  const effectiveButton = seats.includes(buttonSeat) ? buttonSeat : seats[0]
+
   if (seats.length === 2) {
     // Heads-up: the button posts the small blind.
-    const other = seats.find((s) => s !== buttonSeat) ?? buttonSeat
-    return { sbSeat: buttonSeat, bbSeat: other }
+    const other = seats.find((s) => s !== effectiveButton) ?? effectiveButton
+    return { sbSeat: effectiveButton, bbSeat: other }
   }
 
-  const sbSeat = nextActiveSeat(seats, buttonSeat)
+  const sbSeat = nextActiveSeat(seats, effectiveButton)
   const bbSeat = nextActiveSeat(seats, sbSeat)
   return { sbSeat, bbSeat }
 }
@@ -167,7 +171,10 @@ async function assertTurn(
   tx: Transaction,
   tableId: string,
   uid: string,
+  by: string,
 ): Promise<{ table: Table; player: Player }> {
+  if (uid !== by) throw new Error('You can only act for yourself')
+
   const [tSnap, pSnap] = await Promise.all([
     tx.get(tableRef(tableId)),
     tx.get(playerRef(tableId, uid)),
@@ -314,7 +321,7 @@ export async function recordRaise(
   const players = await loadPlayers(tableId)
 
   await runTransaction(db, async (tx) => {
-    const { table, player } = await assertTurn(tx, tableId, uid)
+    const { table, player } = await assertTurn(tx, tableId, uid, by)
 
     const limit = table.settings.raiseLimit
     if (limit !== null && table.raiseCount >= limit) {
@@ -359,7 +366,7 @@ export async function recordAllIn(tableId: string, uid: string, by: string): Pro
   const players = await loadPlayers(tableId)
 
   await runTransaction(db, async (tx) => {
-    const { table, player } = await assertTurn(tx, tableId, uid)
+    const { table, player } = await assertTurn(tx, tableId, uid, by)
     const chips = player.stack
     if (chips <= 0) throw new Error('No chips left to push all-in')
 
@@ -411,7 +418,7 @@ export async function recordCall(
   const players = await loadPlayers(tableId)
 
   await runTransaction(db, async (tx) => {
-    const { table, player } = await assertTurn(tx, tableId, uid)
+    const { table, player } = await assertTurn(tx, tableId, uid, by)
 
     const chips = Math.min(Math.max(amount, 0), player.stack)
     const stackAfter = player.stack - chips
@@ -454,7 +461,7 @@ export async function recordCheck(
   const players = await loadPlayers(tableId)
 
   await runTransaction(db, async (tx) => {
-    const { table, player } = await assertTurn(tx, tableId, uid)
+    const { table, player } = await assertTurn(tx, tableId, uid, by)
 
     const maxOtherCommitted = Math.max(
       0,
@@ -497,7 +504,7 @@ export async function recordFold(
   let autoAwardUid: string | null = null
 
   await runTransaction(db, async (tx) => {
-    const { table, player } = await assertTurn(tx, tableId, uid)
+    const { table, player } = await assertTurn(tx, tableId, uid, by)
     tx.update(playerRef(tableId, uid), { folded: true })
 
     const simulated = players.map((p) => (p.uid === uid ? { ...p, folded: true } : p))
@@ -691,6 +698,11 @@ export async function leaveTable(
   uid: string,
   by: string,
 ): Promise<void> {
+  if (uid !== by) throw new Error('You can only drop yourself off')
+
+  const players = await loadPlayers(tableId)
+  let gameEnded = false
+
   await runTransaction(db, async (tx) => {
     const [tSnap, pSnap] = await Promise.all([
       tx.get(tableRef(tableId)),
@@ -699,8 +711,10 @@ export async function leaveTable(
     if (!tSnap.exists() || !pSnap.exists()) throw new Error('Not found')
     const table = tSnap.data() as Table
     const player = pSnap.data() as Player
-    if (table.handInProgress) throw new Error('Finish the current hand first')
-    if (player.status !== 'active') return
+    if (table.handInProgress && player.status === 'active') {
+      throw new Error('Finish the current hand first')
+    }
+    if (player.status === 'left') return
 
     tx.update(playerRef(tableId, uid), { status: 'left' })
     logLedger(tx, tableId, {
@@ -711,17 +725,25 @@ export async function leaveTable(
       potAfter: table.pot,
       by,
     })
+
+    // End the game immediately if this drop-off leaves at most one player.
+    const remainingActive = players.filter(
+      (p) => p.uid !== uid && p.status === 'active',
+    ).length
+    if (remainingActive <= 1) {
+      tx.update(tableRef(tableId), { status: 'ended' })
+      gameEnded = true
+    }
   })
 
-  await checkGameOver(tableId)
+  if (gameEnded) return
 
   // If everyone who stayed had already voted to continue, the dropout
   // might have been the last holdout — start the next hand now.
+  const active = players.filter((p) => p.uid !== uid && p.status === 'active')
   const tSnap = await getDoc(tableRef(tableId))
   const table = tSnap.exists() ? (tSnap.data() as Table) : null
-  if (table && table.status === 'active' && !table.handInProgress) {
-    const players = await loadPlayers(tableId)
-    const active = players.filter((p) => p.status === 'active')
+  if (table) {
     const allVoted = active.length >= 2 && active.every((p) => table.continueVotes.includes(p.uid))
     if (allVoted) {
       await startHand(tableId, by)
