@@ -19,8 +19,11 @@ service cloud.firestore {
       // Creator must stamp their own uid.
       allow create: if signedIn() && request.resource.data.createdBy == request.auth.uid;
 
-      // Shared control: any member can update table state.
-      allow update: if isMember(tableId);
+      // Shared control: any member can update table state, but only the
+      // host can change game settings.
+      allow update: if isMember(tableId)
+        && (request.resource.data.settings == resource.data.settings
+          || request.auth.uid == resource.data.createdBy);
 
       // Never hard-delete a table — set status:"ended" instead.
       allow delete: if false;

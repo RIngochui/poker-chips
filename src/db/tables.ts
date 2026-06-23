@@ -2,10 +2,12 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore'
 import { db } from './firebase'
@@ -27,7 +29,36 @@ export const defaultSettings: TableSettings = {
   currency: 'CAD',
   chipToDollar: 1,
   defaultBuyIn: 200,
-  blindTimer: null,
+  blindIncrease: null,
+  raiseLimit: null,
+  handLimit: 10,
+}
+
+export function validateSettings(s: TableSettings): string | null {
+  if (!(s.smallBlind > 0)) return 'Small blind must be greater than 0'
+  if (!(s.bigBlind > s.smallBlind)) return 'Big blind must be greater than small blind'
+  if (!(s.chipToDollar > 0) || !Number.isFinite(s.chipToDollar)) {
+    return 'Chip to dollar rate must be a valid positive amount'
+  }
+  if (!(s.defaultBuyIn > 0)) return 'Default buy-in must be greater than 0'
+  if (s.handLimit !== null && !(s.handLimit > 0)) {
+    return 'Hand limit must be greater than 0'
+  }
+  if (s.raiseLimit !== null && !(s.raiseLimit > 0)) {
+    return 'Max raises per hand must be greater than 0'
+  }
+  if (s.blindIncrease !== null) {
+    if (!(s.blindIncrease.amount > 0)) {
+      return 'Blind increase amount must be greater than 0'
+    }
+    if (!(s.blindIncrease.everyHands > 0)) {
+      return 'Hands between blind increases must be greater than 0'
+    }
+    if (s.handLimit !== null && !(s.blindIncrease.everyHands < s.handLimit)) {
+      return 'Hands between blind increases must be less than the hand limit'
+    }
+  }
+  return null
 }
 
 export async function createTable(opts: {
@@ -50,9 +81,18 @@ export async function createTable(opts: {
     createdBy: opts.createdBy,
     createdAt: serverTimestamp(),
     settings: { ...defaultSettings },
+    currentSmallBlind: defaultSettings.smallBlind,
+    currentBigBlind: defaultSettings.bigBlind,
     buttonSeat: 0,
     pot: 0,
     handNumber: 0,
+    handInProgress: false,
+    actingSeat: null,
+    raiseCount: 0,
+    pendingAward: null,
+    street: 'preflop',
+    closerSeat: null,
+    continueVotes: [],
   }
 
   await setDoc(doc(db, 'tables', code), table)
@@ -82,8 +122,18 @@ export async function joinTable(opts: {
     committed: 0,
     connected: true,
     joinedAt: serverTimestamp(),
+    folded: false,
+    ready: false,
   }
   await setDoc(doc(db, 'tables', opts.code, 'players', opts.uid), player)
+}
+
+export async function setPlayerReady(
+  code: string,
+  uid: string,
+  ready: boolean,
+): Promise<void> {
+  await updateDoc(doc(db, 'tables', code, 'players', uid), { ready })
 }
 
 export function nextFreeSeat(players: Player[]): number {
@@ -114,7 +164,16 @@ export function subscribeToPlayers(
 export async function updateTableSettings(
   code: string,
   settings: Partial<TableSettings>,
+  by: string,
 ): Promise<void> {
+  const table = await getTable(code)
+  if (!table) throw new Error('Table not found')
+  if (table.createdBy !== by) throw new Error('Only the host can change settings')
+
+  const merged: TableSettings = { ...table.settings, ...settings }
+  const error = validateSettings(merged)
+  if (error) throw new Error(error)
+
   const updates: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(settings)) {
     updates[`settings.${key}`] = value
@@ -122,6 +181,36 @@ export async function updateTableSettings(
   await updateDoc(doc(db, 'tables', code), updates)
 }
 
-export async function startGame(code: string): Promise<void> {
-  await updateDoc(doc(db, 'tables', code), { status: 'active' })
+export async function startGame(code: string, by: string): Promise<void> {
+  const table = await getTable(code)
+  if (!table) throw new Error('Table not found')
+
+  const playersSnap = await getDocs(collection(db, 'tables', code, 'players'))
+  const players = playersSnap.docs.map((d) => d.data() as Player)
+
+  const batch = writeBatch(db)
+  for (const p of players) {
+    const buyIn = table.settings.defaultBuyIn
+    batch.update(doc(db, 'tables', code, 'players', p.uid), {
+      stack: p.stack + buyIn,
+      totalBuyIn: p.totalBuyIn + buyIn,
+    })
+    const ledgerRef = doc(collection(db, 'tables', code, 'ledger'))
+    batch.set(ledgerRef, {
+      type: 'buy_in',
+      uid: p.uid,
+      amount: buyIn,
+      stackAfter: p.stack + buyIn,
+      potAfter: table.pot,
+      by,
+      at: serverTimestamp(),
+    })
+  }
+  batch.update(doc(db, 'tables', code), {
+    status: 'active',
+    currentSmallBlind: table.settings.smallBlind,
+    currentBigBlind: table.settings.bigBlind,
+  })
+
+  await batch.commit()
 }

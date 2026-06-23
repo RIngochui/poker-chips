@@ -1,5 +1,7 @@
 export type TableStatus = 'lobby' | 'active' | 'ended'
 
+export type Street = 'preflop' | 'flop' | 'turn' | 'river'
+
 export type PlayerStatus = 'active' | 'sitting_out' | 'busted' | 'left'
 
 export type LedgerType =
@@ -11,16 +13,9 @@ export type LedgerType =
   | 'award_pot'
   | 'adjust'
 
-export interface BlindLevel {
-  sb: number
-  bb: number
-  minutes: number
-}
-
-export interface BlindTimer {
-  levels: BlindLevel[]
-  startedAt: number
-  levelIndex: number
+export interface BlindIncrease {
+  amount: number // added to the small blind each step; big blind rises 2x this
+  everyHands: number // step every N completed hands
 }
 
 export interface TableSettings {
@@ -29,7 +24,15 @@ export interface TableSettings {
   currency: 'CAD'
   chipToDollar: number
   defaultBuyIn: number
-  blindTimer: BlindTimer | null
+  blindIncrease: BlindIncrease | null // null = off (default)
+  raiseLimit: number | null // null = No-Limit; otherwise max raises per hand
+  handLimit: number | null // null = unlimited; otherwise prompt to continue every N hands
+}
+
+export interface PendingAward {
+  winnerUid: string
+  proposedBy: string
+  confirmedBy: string[]
 }
 
 export interface Table {
@@ -39,9 +42,18 @@ export interface Table {
   createdBy: string
   createdAt: unknown
   settings: TableSettings
+  currentSmallBlind: number
+  currentBigBlind: number
   buttonSeat: number
   pot: number
   handNumber: number
+  handInProgress: boolean
+  actingSeat: number | null
+  raiseCount: number
+  pendingAward: PendingAward | null
+  street: Street
+  closerSeat: number | null
+  continueVotes: string[]
 }
 
 export interface Player {
@@ -54,6 +66,8 @@ export interface Player {
   committed: number
   connected: boolean
   joinedAt: unknown
+  folded: boolean
+  ready: boolean
 }
 
 export interface LedgerEntry {
