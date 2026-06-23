@@ -1,0 +1,53 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Is the caller already a player in this table?
+    function isMember(tableId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/tables/$(tableId)/players/$(request.auth.uid));
+    }
+
+    match /tables/{tableId} {
+      // Any signed-in user can read a table (needed to look one up by join code).
+      allow read: if signedIn();
+
+      // Creator must stamp their own uid.
+      allow create: if signedIn() && request.resource.data.createdBy == request.auth.uid;
+
+      // Shared control: any member can update table state.
+      allow update: if isMember(tableId);
+
+      // Never hard-delete a table — set status:"ended" instead.
+      allow delete: if false;
+
+      match /players/{playerId} {
+        allow read: if signedIn();
+
+        // You may only create your OWN player doc (this is how you join).
+        allow create: if signedIn()
+          && playerId == request.auth.uid
+          && request.resource.data.uid == request.auth.uid;
+
+        // Shared control: any member can update any player.
+        allow update: if isMember(tableId);
+
+        // Mark status:"left", don't delete.
+        allow delete: if false;
+      }
+
+      match /ledger/{eventId} {
+        allow read: if isMember(tableId);
+
+        // Append-only audit log; the writer must stamp themselves in `by`.
+        allow create: if isMember(tableId)
+          && request.resource.data.by == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+  }
+}
