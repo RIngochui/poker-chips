@@ -1,73 +1,63 @@
-# React + TypeScript + Vite
+# Poker Chips
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A web-first poker chip tracker. The app *is* the chips — it tracks every player's stack and the pot in realtime while the actual poker is played in real life. Real money never moves through the app; it only does the math and produces a copy-paste settlement summary at the end.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- React + Vite + TypeScript + Tailwind CSS
+- Firebase Firestore (realtime data) + Anonymous Auth
+- All Firestore access lives behind `src/db/` so the rest of the app never imports Firebase directly
 
-## React Compiler
+## Project structure
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+src/
+  db/            Firebase abstraction — the only code that touches Firestore
+    firebase.ts  App/auth/firestore init
+    identity.ts  Anonymous sign-in + localStorage display name
+    tables.ts    Table/lobby CRUD, settings validation
+    game.ts      Betting engine — turn order, streets, all-in, pot award
+    types.ts     Data model (Table, Player, LedgerEntry, ...)
+  lib/
+    payouts.ts   Net result + debt settlement calculation
+  pages/
+    Landing.tsx   /        create or join a table
+    Join.tsx      /join    join an existing table by code
+    TablePage.tsx /table/:id  routes to Lobby / ActiveGame / Results by table status
+    ActiveGame.tsx          the live betting screen
+    Results.tsx             final payouts + settle-up summary
+  store/
+    identityStore.ts  Zustand store for the local player's uid/name
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Local development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev       # starts Vite dev server at http://localhost:5173
+npm run build     # typecheck + production build
 ```
+
+## Firestore rules
+
+Security rules live in `firestore.rules` (host-only settings, shared-control table/player updates, append-only ledger). Deploy them with:
+
+```bash
+npm run deploy:rules
+```
+
+This uses `npx firebase-tools` so no global install is required — you'll need to `npx firebase-tools login` once first.
+
+## Data model
+
+See `src/db/types.ts` for the authoritative shape. At a glance:
+
+- `tables/{code}` — table settings, blinds, pot, current street, turn state
+- `tables/{code}/players/{uid}` — per-player stack, status, seat, ready/folded flags
+- `tables/{code}/ledger/{eventId}` — append-only audit trail of every chip movement
+
+## Known simplifications
+
+- Single main pot only — no side pots. Uneven all-ins use an "uncalled bet return" instead of a full side-pot engine.
+- Blind escalation is hand-count based (`settings.blindIncrease`), not wall-clock based.
+- Pot award requires majority confirmation from active players rather than a single declare, except when a fold leaves exactly one contender (auto-awarded).
