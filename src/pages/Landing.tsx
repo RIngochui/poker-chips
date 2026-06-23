@@ -34,6 +34,7 @@ function Landing() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-6 px-4">
+      <img src="/logo.png" alt="Poker Chips" className="h-20 w-20" />
       <h1 className="text-3xl font-semibold text-gray-900">Poker Chips</h1>
       <p className="text-gray-500">Track stacks and the pot. Play poker in real life.</p>
 
