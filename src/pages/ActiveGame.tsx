@@ -197,6 +197,13 @@ function ActiveGame({
         </div>
       )}
 
+      {!table.handInProgress && !checkInDue && active.length < 2 && (
+        <p className="text-center text-sm text-amber-700">
+          Waiting on busted players to rebuy or drop off before the next hand
+          can start.
+        </p>
+      )}
+
       {!table.handInProgress && !checkInDue && (
         <button
           type="button"

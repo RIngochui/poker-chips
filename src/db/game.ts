@@ -687,8 +687,11 @@ export async function awardPot(
 
 export async function checkGameOver(tableId: string): Promise<void> {
   const players = await loadPlayers(tableId)
-  const stillActive = players.filter((p) => p.status === 'active').length
-  if (stillActive <= 1) {
+  // Busted is recoverable via rebuy — only an explicit drop-off ('left')
+  // permanently removes someone from the game. Only end the game once
+  // fewer than 2 players remain who could ever play another hand.
+  const stillInGame = players.filter((p) => p.status !== 'left').length
+  if (stillInGame <= 1) {
     await updateDoc(tableRef(tableId), { status: 'ended' })
   }
 }
@@ -726,11 +729,12 @@ export async function leaveTable(
       by,
     })
 
-    // End the game immediately if this drop-off leaves at most one player.
-    const remainingActive = players.filter(
-      (p) => p.uid !== uid && p.status === 'active',
+    // End the game immediately if this drop-off leaves at most one player
+    // who could still ever play (busted is recoverable, 'left' isn't).
+    const remainingInGame = players.filter(
+      (p) => p.uid !== uid && p.status !== 'left',
     ).length
-    if (remainingActive <= 1) {
+    if (remainingInGame <= 1) {
       tx.update(tableRef(tableId), { status: 'ended' })
       gameEnded = true
     }
