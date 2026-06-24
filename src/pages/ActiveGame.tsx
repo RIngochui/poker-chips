@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   cancelAward,
   computeBlindSeats,
@@ -53,6 +53,31 @@ function ActiveGame({
   const pending = table.pendingAward
   const awaitingNextStreet =
     table.handInProgress && table.actingSeat === null && table.street !== 'river'
+
+  // Keep the screen awake while playing — phones dimming/locking is the
+  // most common cause of the realtime view falling behind on mobile.
+  // The OS releases the lock whenever the tab is backgrounded, so
+  // re-acquire it each time the tab becomes visible again too.
+  useEffect(() => {
+    if (!('wakeLock' in navigator)) return
+
+    let lock: WakeLockSentinel | null = null
+    async function acquire() {
+      if (document.visibilityState !== 'visible') return
+      try {
+        lock = await navigator.wakeLock.request('screen')
+      } catch {
+        // Ignore — not critical if unsupported or denied.
+      }
+    }
+
+    acquire()
+    document.addEventListener('visibilitychange', acquire)
+    return () => {
+      document.removeEventListener('visibilitychange', acquire)
+      lock?.release().catch(() => {})
+    }
+  }, [])
 
   const [winnerUid, setWinnerUid] = useState('')
   const [busy, setBusy] = useState(false)
