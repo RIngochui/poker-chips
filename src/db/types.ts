@@ -30,9 +30,27 @@ export interface TableSettings {
 }
 
 export interface PendingAward {
-  winnerUid: string
+  winnerUids: string[]
   proposedBy: string
   confirmedBy: string[]
+}
+
+export interface HandSnapshotPlayer {
+  stack: number
+  totalBuyIn: number
+  committed: number
+  folded: boolean
+  status: PlayerStatus
+}
+
+export interface HandSnapshot {
+  players: Record<string, HandSnapshotPlayer>
+  pot: number
+  handNumber: number
+  buttonSeat: number
+  currentSmallBlind: number
+  currentBigBlind: number
+  street: Street
 }
 
 export interface Table {
@@ -54,6 +72,7 @@ export interface Table {
   street: Street
   closerSeat: number | null
   continueVotes: string[]
+  lastHandSnapshot: HandSnapshot | null
 }
 
 export interface Player {

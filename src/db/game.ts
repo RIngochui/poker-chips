@@ -10,7 +10,14 @@ import {
   type Transaction,
 } from 'firebase/firestore'
 import { db } from './firebase'
-import type { LedgerEntry, PendingAward, Player, Street, Table } from './types'
+import type {
+  HandSnapshot,
+  LedgerEntry,
+  PendingAward,
+  Player,
+  Street,
+  Table,
+} from './types'
 
 const STREET_ORDER: Street[] = ['preflop', 'flop', 'turn', 'river']
 
@@ -167,6 +174,12 @@ async function loadPlayers(tableId: string): Promise<Player[]> {
   return snap.docs.map((d) => d.data() as Player)
 }
 
+// Just the uids — used to know which docs to re-read transactionally for a
+// consistent snapshot, since seat/uid never change after joining.
+async function loadPlayerIds(tableId: string): Promise<string[]> {
+  return (await loadPlayers(tableId)).map((p) => p.uid)
+}
+
 async function assertTurn(
   tx: Transaction,
   tableId: string,
@@ -203,12 +216,42 @@ export async function startHand(tableId: string, by: string): Promise<void> {
     }
     await batch.commit()
   }
+  // Reflect that cleanup in-memory too, so the undo snapshot below (and
+  // the blind seat computation) reflect the actual pre-blind state rather
+  // than whatever was left over from before the reset.
+  const cleaned = players.map((p) =>
+    p.committed !== 0 || p.folded ? { ...p, committed: 0, folded: false } : p,
+  )
 
   await runTransaction(db, async (tx) => {
     const tSnap = await tx.get(tableRef(tableId))
     if (!tSnap.exists()) throw new Error('Table not found')
     const table = tSnap.data() as Table
     if (table.handInProgress) return
+
+    // Snapshot pre-hand state so the host can undo this hand once it
+    // finishes. Each new hand overwrites the previous snapshot, so only
+    // the most recently completed hand is ever undoable.
+    const snapshot: HandSnapshot = {
+      players: Object.fromEntries(
+        cleaned.map((p) => [
+          p.uid,
+          {
+            stack: p.stack,
+            totalBuyIn: p.totalBuyIn,
+            committed: p.committed,
+            folded: p.folded,
+            status: p.status,
+          },
+        ]),
+      ),
+      pot: table.pot,
+      handNumber: table.handNumber,
+      buttonSeat: table.buttonSeat,
+      currentSmallBlind: table.currentSmallBlind,
+      currentBigBlind: table.currentBigBlind,
+      street: table.street,
+    }
 
     const { sbSeat, bbSeat } = computeBlindSeats(active, table.buttonSeat)
     const sbUid = active.find((p) => p.seat === sbSeat)!.uid
@@ -283,6 +326,7 @@ export async function startHand(tableId: string, by: string): Promise<void> {
       pendingAward: null,
       street: 'preflop',
       continueVotes: [],
+      lastHandSnapshot: snapshot,
     })
   })
 }
@@ -318,7 +362,7 @@ export async function recordRaise(
   by: string,
 ): Promise<void> {
   if (amount <= 0) throw new Error('Enter an amount')
-  const players = await loadPlayers(tableId)
+  const playerIds = await loadPlayerIds(tableId)
 
   await runTransaction(db, async (tx) => {
     const { table, player } = await assertTurn(tx, tableId, uid, by)
@@ -327,6 +371,9 @@ export async function recordRaise(
     if (limit !== null && table.raiseCount >= limit) {
       throw new Error('Raise limit reached for this round')
     }
+
+    const freshSnaps = await Promise.all(playerIds.map((id) => tx.get(playerRef(tableId, id))))
+    const players = freshSnaps.map((s) => s.data() as Player)
 
     const chips = Math.min(amount, player.stack)
     const stackAfter = player.stack - chips
@@ -363,12 +410,15 @@ export async function recordRaise(
 }
 
 export async function recordAllIn(tableId: string, uid: string, by: string): Promise<void> {
-  const players = await loadPlayers(tableId)
+  const playerIds = await loadPlayerIds(tableId)
 
   await runTransaction(db, async (tx) => {
     const { table, player } = await assertTurn(tx, tableId, uid, by)
     const chips = player.stack
     if (chips <= 0) throw new Error('No chips left to push all-in')
+
+    const freshSnaps = await Promise.all(playerIds.map((id) => tx.get(playerRef(tableId, id))))
+    const players = freshSnaps.map((s) => s.data() as Player)
 
     const maxOtherCommitted = Math.max(
       0,
@@ -415,10 +465,13 @@ export async function recordCall(
   amount: number,
   by: string,
 ): Promise<void> {
-  const players = await loadPlayers(tableId)
+  const playerIds = await loadPlayerIds(tableId)
 
   await runTransaction(db, async (tx) => {
     const { table, player } = await assertTurn(tx, tableId, uid, by)
+
+    const freshSnaps = await Promise.all(playerIds.map((id) => tx.get(playerRef(tableId, id))))
+    const players = freshSnaps.map((s) => s.data() as Player)
 
     const chips = Math.min(Math.max(amount, 0), player.stack)
     const stackAfter = player.stack - chips
@@ -458,10 +511,13 @@ export async function recordCheck(
   uid: string,
   by: string,
 ): Promise<void> {
-  const players = await loadPlayers(tableId)
+  const playerIds = await loadPlayerIds(tableId)
 
   await runTransaction(db, async (tx) => {
     const { table, player } = await assertTurn(tx, tableId, uid, by)
+
+    const freshSnaps = await Promise.all(playerIds.map((id) => tx.get(playerRef(tableId, id))))
+    const players = freshSnaps.map((s) => s.data() as Player)
 
     const maxOtherCommitted = Math.max(
       0,
@@ -500,11 +556,15 @@ export async function recordFold(
   uid: string,
   by: string,
 ): Promise<void> {
-  const players = await loadPlayers(tableId)
+  const playerIds = await loadPlayerIds(tableId)
   let autoAwardUid: string | null = null
 
   await runTransaction(db, async (tx) => {
     const { table, player } = await assertTurn(tx, tableId, uid, by)
+
+    const freshSnaps = await Promise.all(playerIds.map((id) => tx.get(playerRef(tableId, id))))
+    const players = freshSnaps.map((s) => s.data() as Player)
+
     tx.update(playerRef(tableId, uid), { folded: true })
 
     const simulated = players.map((p) => (p.uid === uid ? { ...p, folded: true } : p))
@@ -527,7 +587,7 @@ export async function recordFold(
   })
 
   if (autoAwardUid) {
-    await awardPot(tableId, autoAwardUid, by)
+    await awardPot(tableId, [autoAwardUid], by)
   }
 }
 
@@ -621,20 +681,22 @@ export async function recordBuyIn(
   })
 
   if (autoAwardUid) {
-    await awardPot(tableId, autoAwardUid, by)
+    await awardPot(tableId, [autoAwardUid], by)
   }
 }
 
 export async function awardPot(
   tableId: string,
-  winnerUid: string,
+  winnerUids: string[],
   by: string,
 ): Promise<void> {
+  if (winnerUids.length === 0) throw new Error('No winner selected')
   const players = await loadPlayers(tableId)
   const active = players.filter((p) => p.status === 'active')
+  const winnerSet = new Set(winnerUids)
 
   const others = players.filter(
-    (p) => p.uid !== winnerUid && (p.committed !== 0 || p.folded),
+    (p) => !winnerSet.has(p.uid) && (p.committed !== 0 || p.folded),
   )
   if (others.length > 0) {
     const batch = writeBatch(db)
@@ -651,22 +713,45 @@ export async function awardPot(
     if (!tSnap.exists()) throw new Error('Table not found')
     const table = tSnap.data() as Table
 
-    const winnerSnap = await tx.get(playerRef(tableId, winnerUid))
-    if (!winnerSnap.exists()) throw new Error('Player not found')
-    const winner = winnerSnap.data() as Player
-
-    const stackAfter = winner.stack + table.pot
-    const winnerUpdates: Record<string, unknown> = { stack: stackAfter, committed: 0 }
-    if (stackAfter === 0) winnerUpdates.status = 'busted'
-    tx.update(playerRef(tableId, winnerUid), winnerUpdates)
-    logLedger(tx, tableId, {
-      type: 'award_pot',
-      uid: winnerUid,
-      amount: table.pot,
-      stackAfter,
-      potAfter: 0,
-      by,
+    const winnerSnaps = await Promise.all(
+      winnerUids.map((uid) => tx.get(playerRef(tableId, uid))),
+    )
+    const winners = winnerSnaps.map((snap) => {
+      if (!snap.exists()) throw new Error('Player not found')
+      return snap.data() as Player
     })
+
+    // Split evenly; any remainder (pot not divisible by winner count) is
+    // handed out one chip at a time starting from the seat right after
+    // the button — the standard poker convention for odd chips.
+    const base = Math.floor(table.pot / winners.length)
+    let remainder = table.pot - base * winners.length
+    const order = [...winners].sort((a, b) => {
+      const seats = activeSeats(active)
+      const distFromButton = (seat: number) => {
+        const idx = seats.indexOf(seat)
+        const btnIdx = seats.indexOf(table.buttonSeat)
+        return ((idx - btnIdx + seats.length) % seats.length) || seats.length
+      }
+      return distFromButton(a.seat) - distFromButton(b.seat)
+    })
+
+    for (const winner of order) {
+      const share = base + (remainder > 0 ? 1 : 0)
+      if (remainder > 0) remainder--
+      const stackAfter = winner.stack + share
+      const winnerUpdates: Record<string, unknown> = { stack: stackAfter, committed: 0 }
+      if (stackAfter === 0) winnerUpdates.status = 'busted'
+      tx.update(playerRef(tableId, winner.uid), winnerUpdates)
+      logLedger(tx, tableId, {
+        type: 'award_pot',
+        uid: winner.uid,
+        amount: share,
+        stackAfter,
+        potAfter: 0,
+        by,
+      })
+    }
 
     const seats = activeSeats(active)
     const nextButton = nextActiveSeat(seats, table.buttonSeat)
@@ -761,18 +846,19 @@ function majorityNeeded(totalActivePlayers: number): number {
 
 export async function proposeAward(
   tableId: string,
-  winnerUid: string,
+  winnerUids: string[],
   by: string,
 ): Promise<void> {
+  if (winnerUids.length === 0) throw new Error('Select at least one winner')
   const players = await loadPlayers(tableId)
   const total = players.filter((p) => p.status === 'active').length
   const needed = majorityNeeded(total)
 
-  const pendingAward: PendingAward = { winnerUid, proposedBy: by, confirmedBy: [by] }
+  const pendingAward: PendingAward = { winnerUids, proposedBy: by, confirmedBy: [by] }
   await updateDoc(tableRef(tableId), { pendingAward })
 
   if (pendingAward.confirmedBy.length >= needed) {
-    await awardPot(tableId, winnerUid, by)
+    await awardPot(tableId, winnerUids, by)
   }
 }
 
@@ -791,7 +877,7 @@ export async function confirmAward(tableId: string, by: string): Promise<void> {
   const needed = majorityNeeded(total)
 
   if (confirmedBy.length >= needed) {
-    await awardPot(tableId, table.pendingAward.winnerUid, by)
+    await awardPot(tableId, table.pendingAward.winnerUids, by)
   } else {
     await updateDoc(tableRef(tableId), {
       'pendingAward.confirmedBy': confirmedBy,
@@ -801,4 +887,123 @@ export async function confirmAward(tableId: string, by: string): Promise<void> {
 
 export async function cancelAward(tableId: string): Promise<void> {
   await updateDoc(tableRef(tableId), { pendingAward: null })
+}
+
+// Host-only removal of a stuck or unwanted player. Mirrors leaveTable's
+// ledger/game-over handling but isn't restricted to acting on yourself,
+// and folds the target out of any hand they're currently contesting first.
+export async function kickPlayer(
+  tableId: string,
+  targetUid: string,
+  hostUid: string,
+): Promise<void> {
+  const playerIds = await loadPlayerIds(tableId)
+  let autoAwardUid: string | null = null
+  let gameEnded = false
+
+  await runTransaction(db, async (tx) => {
+    const tSnap = await tx.get(tableRef(tableId))
+    if (!tSnap.exists()) throw new Error('Table not found')
+    const table = tSnap.data() as Table
+    if (table.createdBy !== hostUid) throw new Error('Only the host can kick players')
+
+    const freshSnaps = await Promise.all(playerIds.map((id) => tx.get(playerRef(tableId, id))))
+    const players = freshSnaps.map((s) => s.data() as Player)
+    const player = players.find((p) => p.uid === targetUid)
+    if (!player) throw new Error('Player not found')
+    if (player.status === 'left') return
+
+    const updates: Record<string, unknown> = { status: 'left' }
+
+    if (table.handInProgress && player.status === 'active' && !player.folded) {
+      updates.folded = true
+      const simulated = players.map((p) =>
+        p.uid === targetUid ? { ...p, folded: true } : p,
+      )
+      const turn = resolveTurn(simulated, player.seat, table.closerSeat, false)
+
+      if (turn.handDecided) {
+        const remaining = simulated.find((p) => p.status === 'active' && !p.folded)
+        autoAwardUid = remaining?.uid ?? null
+      } else {
+        const finalPot =
+          turn.actingSeat === null
+            ? refundUncalledBet(tx, tableId, simulated, table.pot)
+            : table.pot
+        tx.update(tableRef(tableId), {
+          pot: finalPot,
+          actingSeat: turn.actingSeat,
+          closerSeat: turn.closerSeat,
+        })
+      }
+    }
+
+    tx.update(playerRef(tableId, targetUid), updates)
+    logLedger(tx, tableId, {
+      type: 'cash_out',
+      uid: targetUid,
+      amount: player.stack,
+      stackAfter: player.stack,
+      potAfter: table.pot,
+      by: hostUid,
+    })
+
+    const remainingInGame = players.filter(
+      (p) => p.uid !== targetUid && p.status !== 'left',
+    ).length
+    if (remainingInGame <= 1) {
+      tx.update(tableRef(tableId), { status: 'ended' })
+      gameEnded = true
+    }
+  })
+
+  if (gameEnded) return
+
+  if (autoAwardUid) {
+    await awardPot(tableId, [autoAwardUid], hostUid)
+  }
+}
+
+// Restores the table and every player to the state captured right before
+// the most recently completed hand started. Only available between hands
+// (no hand in progress) and only undoes the single most recent hand —
+// starting a new hand overwrites the snapshot.
+export async function undoLastHand(tableId: string, hostUid: string): Promise<void> {
+  await runTransaction(db, async (tx) => {
+    const tSnap = await tx.get(tableRef(tableId))
+    if (!tSnap.exists()) throw new Error('Table not found')
+    const table = tSnap.data() as Table
+    if (table.createdBy !== hostUid) throw new Error('Only the host can undo a hand')
+    if (table.handInProgress) throw new Error('Finish the current hand first')
+    const snapshot = table.lastHandSnapshot
+    if (!snapshot) throw new Error('No hand to undo')
+
+    for (const [uid, state] of Object.entries(snapshot.players)) {
+      tx.update(playerRef(tableId, uid), { ...state })
+    }
+
+    logLedger(tx, tableId, {
+      type: 'adjust',
+      uid: hostUid,
+      amount: 0,
+      stackAfter: 0,
+      potAfter: snapshot.pot,
+      by: hostUid,
+    })
+
+    tx.update(tableRef(tableId), {
+      pot: snapshot.pot,
+      handNumber: snapshot.handNumber,
+      buttonSeat: snapshot.buttonSeat,
+      currentSmallBlind: snapshot.currentSmallBlind,
+      currentBigBlind: snapshot.currentBigBlind,
+      street: snapshot.street,
+      handInProgress: false,
+      actingSeat: null,
+      closerSeat: null,
+      raiseCount: 0,
+      pendingAward: null,
+      lastHandSnapshot: null,
+    })
+  })
 }
