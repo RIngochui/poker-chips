@@ -43,6 +43,16 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      // Seat-claim docs (id = seat number) make joining atomic: a seat is
+      // claimed by creating its doc, and a doc can only be created once,
+      // so two people joining at the same instant can't land on the same
+      // seat. Never updated or deleted — they're a permanent record.
+      match /seatClaims/{seat} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if false;
+      }
+
       match /ledger/{eventId} {
         allow read: if isMember(tableId);
 

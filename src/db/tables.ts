@@ -4,6 +4,7 @@ import {
   getDoc,
   getDocs,
   onSnapshot,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -93,10 +94,11 @@ export async function createTable(opts: {
     street: 'preflop',
     closerSeat: null,
     continueVotes: [],
+    lastHandSnapshot: null,
   }
 
   await setDoc(doc(db, 'tables', code), table)
-  await joinTable({ code, uid: opts.createdBy, name: opts.creatorName, seat: 0 })
+  await joinTable({ code, uid: opts.createdBy, name: opts.creatorName })
 
   return code
 }
@@ -106,26 +108,57 @@ export async function getTable(code: string): Promise<Table | null> {
   return snap.exists() ? (snap.data() as Table) : null
 }
 
+// Seat numbers must be unique. Picking "the next free seat" by reading the
+// player list and writing a plain doc is a classic check-then-act race —
+// two people joining at the same moment can both compute the same free
+// seat before either's join has landed, producing two players who share a
+// seat (and therefore identical button/blind/turn badges). Each candidate
+// seat is claimed atomically via a transaction on a dedicated seatClaims
+// doc: only one of two simultaneous claims for the same seat can win, so
+// the loser retries the next seat instead.
 export async function joinTable(opts: {
   code: string
   uid: string
   name: string
-  seat: number
 }): Promise<void> {
-  const player: Player = {
-    uid: opts.uid,
-    name: opts.name,
-    seat: opts.seat,
-    stack: 0,
-    status: 'active',
-    totalBuyIn: 0,
-    committed: 0,
-    connected: true,
-    joinedAt: serverTimestamp(),
-    folded: false,
-    ready: false,
+  const playerDocRef = doc(db, 'tables', opts.code, 'players', opts.uid)
+  if ((await getDoc(playerDocRef)).exists()) return // already joined
+
+  const playersSnap = await getDocs(collection(db, 'tables', opts.code, 'players'))
+  const maxSeat = playersSnap.docs.reduce(
+    (max, d) => Math.max(max, (d.data() as Player).seat),
+    -1,
+  )
+
+  for (let seat = maxSeat + 1; seat <= maxSeat + 50; seat++) {
+    const claimRef = doc(db, 'tables', opts.code, 'seatClaims', String(seat))
+    try {
+      await runTransaction(db, async (tx) => {
+        const claimSnap = await tx.get(claimRef)
+        if (claimSnap.exists()) throw new Error('seat-taken')
+
+        const player: Player = {
+          uid: opts.uid,
+          name: opts.name,
+          seat,
+          stack: 0,
+          status: 'active',
+          totalBuyIn: 0,
+          committed: 0,
+          connected: true,
+          joinedAt: serverTimestamp(),
+          folded: false,
+          ready: false,
+        }
+        tx.set(claimRef, { uid: opts.uid })
+        tx.set(playerDocRef, player)
+      })
+      return
+    } catch (err) {
+      if ((err as Error).message !== 'seat-taken') throw err
+    }
   }
-  await setDoc(doc(db, 'tables', opts.code, 'players', opts.uid), player)
+  throw new Error('Table is full')
 }
 
 export async function setPlayerReady(
@@ -134,13 +167,6 @@ export async function setPlayerReady(
   ready: boolean,
 ): Promise<void> {
   await updateDoc(doc(db, 'tables', code, 'players', uid), { ready })
-}
-
-export function nextFreeSeat(players: Player[]): number {
-  const taken = new Set(players.map((p) => p.seat))
-  let seat = 0
-  while (taken.has(seat)) seat++
-  return seat
 }
 
 export function subscribeToTable(

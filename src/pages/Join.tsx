@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getTable, joinTable, nextFreeSeat, subscribeToPlayers } from '../db/tables'
+import { getTable, joinTable } from '../db/tables'
 import { useIdentityStore } from '../store/identityStore'
 
 function Join() {
@@ -35,14 +35,7 @@ function Join() {
         return
       }
 
-      const seat = await new Promise<number>((resolve) => {
-        const unsubscribe = subscribeToPlayers(upperCode, (players) => {
-          unsubscribe()
-          resolve(nextFreeSeat(players))
-        })
-      })
-
-      await joinTable({ code: upperCode, uid, name: name.trim(), seat })
+      await joinTable({ code: upperCode, uid, name: name.trim() })
       navigate(`/table/${upperCode}`)
     } catch (err) {
       setError('Could not join table. Try again.')
