@@ -18,9 +18,10 @@ function App() {
 
   useEffect(() => {
     // Mobile browsers throttle/suspend network activity when the tab is
-    // backgrounded (screen lock, app switch). Firestore's own reconnect
-    // backoff can leave the view stale for a while after coming back —
-    // force an immediate reconnect instead of waiting for it.
+    // backgrounded (screen lock, app switch), or when switching between
+    // WiFi and cellular. Firestore's own reconnect backoff can leave the
+    // view stale for a while after either case — force an immediate
+    // reconnect instead of waiting for it.
     async function nudgeReconnect() {
       if (document.visibilityState !== 'visible') return
       await disableNetwork(db)
@@ -28,7 +29,20 @@ function App() {
     }
 
     document.addEventListener('visibilitychange', nudgeReconnect)
-    return () => document.removeEventListener('visibilitychange', nudgeReconnect)
+    window.addEventListener('online', nudgeReconnect)
+
+    // Mobile signal can also degrade gradually (e.g. weak/spotty
+    // cellular) without ever firing 'offline'/'online' or a visibility
+    // change — the exact case players reported needing a manual page
+    // refresh to fix. Periodically force the same reconnect cycle a
+    // refresh would do, so a stuck listener can't go unnoticed for long.
+    const interval = window.setInterval(nudgeReconnect, 15000)
+
+    return () => {
+      document.removeEventListener('visibilitychange', nudgeReconnect)
+      window.removeEventListener('online', nudgeReconnect)
+      window.clearInterval(interval)
+    }
   }, [])
 
   if (!ready) {

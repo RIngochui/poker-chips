@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   cancelAward,
   computeBlindSeats,
   confirmAward,
   dealNextStreet,
+  kickPlayer,
   leaveTable,
   proposeAward,
   recordAllIn,
@@ -14,6 +15,7 @@ import {
   recordFold,
   recordRaise,
   startHand,
+  undoLastHand,
 } from '../db/game'
 import type { Player, Table } from '../db/types'
 
@@ -44,7 +46,7 @@ function ActiveGame({
   players: Player[]
   uid: string | null
 }) {
-  const sorted = [...players].sort((a, b) => a.seat - b.seat)
+  const sorted = [...players].sort((a, b) => a.seat - b.seat).filter((p) => p.status !== 'left')
   const active = sorted.filter((p) => p.status === 'active')
   const contenders = active.filter((p) => !p.folded)
   const maxCommitted = Math.max(0, ...contenders.map((p) => p.committed))
@@ -53,6 +55,38 @@ function ActiveGame({
   const pending = table.pendingAward
   const awaitingNextStreet =
     table.handInProgress && table.actingSeat === null && table.street !== 'river'
+  const isHost = uid !== null && uid === table.createdBy
+  const you = sorted.find((p) => p.uid === uid)
+  const isYourTurn = table.handInProgress && you !== undefined && you.seat === table.actingSeat
+
+  const isIOS = typeof navigator !== 'undefined' && /iphone|ipad|ipod/i.test(navigator.userAgent)
+  const isStandalone =
+    typeof window !== 'undefined' &&
+    (window.matchMedia('(display-mode: standalone)').matches ||
+      (navigator as unknown as { standalone?: boolean }).standalone === true)
+
+  const [alertsMuted, setAlertsMuted] = useState(
+    () => localStorage.getItem('poker-chips:turnAlertsMuted') === '1',
+  )
+  function setMuted(muted: boolean) {
+    localStorage.setItem('poker-chips:turnAlertsMuted', muted ? '1' : '0')
+    setAlertsMuted(muted)
+  }
+
+  // Buzz + best-effort in-page notification when it becomes your turn.
+  // Only fires while this tab is open/foregrounded — there's no backend
+  // to deliver a true locked-screen push notification. Players can mute
+  // this from the banner below without revoking browser permission.
+  const wasYourTurn = useRef(false)
+  useEffect(() => {
+    if (isYourTurn && !wasYourTurn.current && !alertsMuted) {
+      if ('vibrate' in navigator) navigator.vibrate(200)
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification('Your turn', { body: 'It’s your turn to act.' })
+      }
+    }
+    wasYourTurn.current = isYourTurn
+  }, [isYourTurn, alertsMuted])
 
   // Keep the screen awake while playing — phones dimming/locking is the
   // most common cause of the realtime view falling behind on mobile.
@@ -79,8 +113,11 @@ function ActiveGame({
     }
   }, [])
 
-  const [winnerUid, setWinnerUid] = useState('')
+  const [winnerUids, setWinnerUids] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | null>(
+    typeof Notification !== 'undefined' ? Notification.permission : null,
+  )
 
   async function run(fn: () => Promise<void>) {
     setBusy(true)
@@ -94,14 +131,48 @@ function ActiveGame({
     }
   }
 
+  function toggleWinner(uid: string) {
+    setWinnerUids((cur) => (cur.includes(uid) ? cur.filter((u) => u !== uid) : [...cur, uid]))
+  }
+
   const needed = Math.floor(active.length / 2) + 1
-  const proposedPlayer = pending && players.find((p) => p.uid === pending.winnerUid)
+  const proposedPlayers = pending
+    ? players.filter((p) => pending.winnerUids.includes(p.uid))
+    : []
   const handLimit = table.settings.handLimit
   const checkInDue =
     !table.handInProgress && handLimit !== null && table.handNumber >= handLimit
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-2xl flex-col gap-6 px-4 py-10">
+    <div className="mx-auto flex min-h-screen max-w-2xl flex-col gap-6 px-4 py-10 pb-28">
+      {isIOS && !isStandalone && (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          On iPhone, turn alerts only work if this page is added to your Home Screen
+          (Share → Add to Home Screen) — a regular Safari/Chrome tab can't vibrate or
+          send notifications.
+        </p>
+      )}
+      {(!isIOS || isStandalone) && notifPermission === 'default' && (
+        <button
+          type="button"
+          onClick={async () => {
+            const result = await Notification.requestPermission()
+            setNotifPermission(result)
+          }}
+          className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-700 hover:bg-indigo-100"
+        >
+          Turn on turn alerts (vibrate + notify while this tab is open)
+        </button>
+      )}
+      {(!isIOS || isStandalone) && notifPermission === 'granted' && (
+        <button
+          type="button"
+          onClick={() => setMuted(!alertsMuted)}
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100"
+        >
+          {alertsMuted ? 'Turn alerts muted — tap to unmute' : 'Mute turn alerts'}
+        </button>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm text-gray-500">Table {table.code}</p>
@@ -142,6 +213,8 @@ function ActiveGame({
             handInProgress={table.handInProgress}
             raiseBlocked={raiseLimit !== null && table.raiseCount >= raiseLimit}
             actorUid={uid}
+            isHost={isHost}
+            onKick={() => run(() => kickPlayer(code, p.uid, uid!))}
           />
         ))}
       </div>
@@ -204,68 +277,53 @@ function ActiveGame({
         </p>
       )}
 
-      {!table.handInProgress && !checkInDue && (
-        <button
-          type="button"
-          onClick={() => uid && run(() => startHand(code, uid))}
-          disabled={busy || active.length < 2}
-          className="w-full rounded-md bg-indigo-600 px-4 py-3 text-lg font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
-        >
-          Start Hand
-        </button>
-      )}
-
-      {awaitingNextStreet && (
-        <button
-          type="button"
-          onClick={() => run(() => dealNextStreet(code))}
-          disabled={busy}
-          className="w-full rounded-md bg-amber-500 px-4 py-3 text-lg font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
-        >
-          {NEXT_STREET_LABEL[table.street]}
-        </button>
-      )}
-
-      {table.handInProgress && !pending && (
+      {table.handInProgress && !pending && table.street === 'river' && (
         <div className="space-y-2 rounded-md border border-gray-200 bg-white p-4">
-          <p className="text-sm font-medium text-gray-700">Propose pot winner</p>
-          <div className="flex gap-2">
-            <select
-              value={winnerUid}
-              onChange={(e) => setWinnerUid(e.target.value)}
-              className="flex-1 rounded-md border border-gray-300 px-3 py-2"
-            >
-              <option value="">Select winner…</option>
-              {contenders.map((p) => (
-                <option key={p.uid} value={p.uid}>
-                  {p.name} (seat {p.seat})
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() =>
-                uid &&
-                winnerUid &&
-                run(async () => {
-                  await proposeAward(code, winnerUid, uid)
-                  setWinnerUid('')
-                })
-              }
-              disabled={busy || !winnerUid}
-              className="rounded-md bg-emerald-600 px-4 py-2 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-            >
-              Propose
-            </button>
+          <p className="text-sm font-medium text-gray-700">
+            Propose pot winner{contenders.length > 1 ? '(s)' : ''}
+          </p>
+          <div className="space-y-1">
+            {contenders.map((p) => (
+              <label
+                key={p.uid}
+                className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700"
+              >
+                <input
+                  type="checkbox"
+                  checked={winnerUids.includes(p.uid)}
+                  onChange={() => toggleWinner(p.uid)}
+                  className="h-4 w-4"
+                />
+                {p.name} (seat {p.seat})
+              </label>
+            ))}
           </div>
+          <button
+            type="button"
+            onClick={() =>
+              uid &&
+              winnerUids.length > 0 &&
+              run(async () => {
+                await proposeAward(code, winnerUids, uid)
+                setWinnerUids([])
+              })
+            }
+            disabled={busy || winnerUids.length === 0}
+            className="w-full rounded-md bg-emerald-600 px-4 py-2 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            Propose{winnerUids.length > 1 ? ` (split ${winnerUids.length} ways)` : ''}
+          </button>
         </div>
       )}
 
       {table.handInProgress && pending && (
         <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-4">
           <p className="text-sm text-amber-800">
-            <span className="font-medium">{proposedPlayer?.name ?? 'Someone'}</span>{' '}
-            proposed as winner — {pending.confirmedBy.length}/{needed} confirmations
+            <span className="font-medium">
+              {proposedPlayers.map((p) => p.name).join(' & ') || 'Someone'}
+            </span>{' '}
+            proposed as winner{proposedPlayers.length > 1 ? 's' : ''} —{' '}
+            {pending.confirmedBy.length}/{needed} confirmations
           </p>
           <div className="flex gap-2">
             <button
@@ -287,6 +345,48 @@ function ActiveGame({
           </div>
         </div>
       )}
+
+      {isHost && !table.handInProgress && table.lastHandSnapshot && (
+        <button
+          type="button"
+          onClick={() =>
+            uid &&
+            confirm('Undo the last hand? This restores every stack and the pot to before it started.') &&
+            run(() => undoLastHand(code, uid))
+          }
+          disabled={busy}
+          className="w-full rounded-md border border-rose-300 px-4 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+        >
+          Undo last hand
+        </button>
+      )}
+
+      {((!table.handInProgress && !checkInDue) || awaitingNextStreet) && (
+        <div className="fixed inset-x-0 bottom-0 border-t border-gray-200 bg-white/95 px-4 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
+          <div className="mx-auto max-w-2xl">
+            {!table.handInProgress && !checkInDue && (
+              <button
+                type="button"
+                onClick={() => uid && run(() => startHand(code, uid))}
+                disabled={busy || active.length < 2}
+                className="w-full rounded-md bg-indigo-600 px-4 py-3 text-lg font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                Start Hand
+              </button>
+            )}
+            {awaitingNextStreet && (
+              <button
+                type="button"
+                onClick={() => run(() => dealNextStreet(code))}
+                disabled={busy}
+                className="w-full rounded-md bg-amber-500 px-4 py-3 text-lg font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
+              >
+                {NEXT_STREET_LABEL[table.street]}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -303,6 +403,8 @@ function PlayerRow({
   handInProgress,
   raiseBlocked,
   actorUid,
+  isHost,
+  onKick,
 }: {
   code: string
   player: Player
@@ -315,6 +417,8 @@ function PlayerRow({
   handInProgress: boolean
   raiseBlocked: boolean
   actorUid: string | null
+  isHost: boolean
+  onKick: () => void
 }) {
   const [betAmount, setBetAmount] = useState(0)
   const [buyInAmount, setBuyInAmount] = useState(0)
@@ -333,12 +437,16 @@ function PlayerRow({
     handInProgress && player.status === 'active' && !player.folded && isTurn && isYou
   const isBusted = player.status === 'busted'
 
+  const tint = player.folded
+    ? 'border-rose-200 bg-rose-50'
+    : isBusted
+      ? 'border-amber-200 bg-amber-50'
+      : isTurn
+        ? 'border-emerald-200 bg-emerald-50'
+        : 'border-gray-200 bg-white'
+
   return (
-    <div
-      className={`rounded-md border bg-white p-4 ${
-        isTurn ? 'border-indigo-400 ring-2 ring-indigo-100' : 'border-gray-200'
-      }`}
-    >
+    <div className={`rounded-md border p-4 ${tint}`}>
       <div className="flex items-center justify-between">
         <div>
           <span className="font-medium text-gray-900">
@@ -347,21 +455,30 @@ function PlayerRow({
             {isButton && <span className="ml-2 text-xs text-amber-600">D</span>}
             {isSB && <span className="ml-2 text-xs text-sky-600">SB</span>}
             {isBB && <span className="ml-2 text-xs text-sky-600">BB</span>}
-            {player.folded && <span className="ml-2 text-xs text-gray-400">folded</span>}
+            {player.folded && <span className="ml-2 text-xs text-rose-600">folded</span>}
             {player.status === 'busted' && (
-              <span className="ml-2 text-xs text-rose-500">busted — rebuy to rejoin</span>
-            )}
-            {player.status === 'left' && (
-              <span className="ml-2 text-xs text-gray-400">left the game</span>
+              <span className="ml-2 text-xs text-amber-600">busted — rebuy to rejoin</span>
             )}
             {isTurn && <span className="ml-2 text-xs text-indigo-600">to act</span>}
           </span>
           <p className="text-xs text-gray-400">Seat {player.seat}</p>
         </div>
-        <div className="text-right">
-          <p className="font-semibold text-gray-900">{player.stack} chips</p>
-          {player.committed > 0 && (
-            <p className="text-xs text-gray-400">committed {player.committed}</p>
+        <div className="flex items-center gap-3 text-right">
+          <div>
+            <p className="font-semibold text-gray-900">{player.stack} chips</p>
+            {player.committed > 0 && (
+              <p className="text-xs text-gray-400">committed {player.committed}</p>
+            )}
+          </div>
+          {isHost && !isYou && (
+            <button
+              type="button"
+              onClick={() => confirm(`Kick ${player.name} from the table?`) && onKick()}
+              title="Kick player"
+              className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-100"
+            >
+              Kick
+            </button>
           )}
         </div>
       </div>

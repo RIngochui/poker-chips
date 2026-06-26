@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { kickPlayer } from '../db/game'
 import {
   setPlayerReady,
   startGame,
@@ -80,7 +81,7 @@ function Lobby({
   players: Player[]
   uid: string | null
 }) {
-  const sorted = [...players].sort((a, b) => a.seat - b.seat)
+  const sorted = [...players].sort((a, b) => a.seat - b.seat).filter((p) => p.status !== 'left')
   const isHost = uid === table.createdBy
   const nonHostPlayers = sorted.filter((p) => p.uid !== table.createdBy)
   const allReady = nonHostPlayers.length > 0 && nonHostPlayers.every((p) => p.ready)
@@ -102,7 +103,7 @@ function Lobby({
   }
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-2xl flex-col gap-8 px-4 py-10">
+    <div className="mx-auto flex min-h-screen max-w-2xl flex-col gap-8 px-4 py-10 pb-28">
       <div className="text-center">
         <p className="text-sm text-gray-500">Join code</p>
         <p className="font-mono text-5xl font-bold tracking-widest text-indigo-600">
@@ -140,6 +141,20 @@ function Lobby({
                   >
                     {p.ready ? 'Ready' : 'Not ready'}
                   </span>
+                )}
+                {isHost && p.uid !== table.createdBy && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      uid &&
+                      confirm(`Kick ${p.name} from the table?`) &&
+                      kickPlayer(code, p.uid, uid).catch((err) => alert((err as Error).message))
+                    }
+                    title="Kick player"
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-500 hover:bg-gray-100"
+                  >
+                    Kick
+                  </button>
                 )}
               </div>
             </li>
@@ -297,28 +312,34 @@ function Lobby({
         </p>
       </div>
 
-      {isHost ? (
-        <button
-          type="button"
-          onClick={() => uid && startGame(code, uid)}
-          disabled={!allReady}
-          className="w-full rounded-md bg-indigo-600 px-4 py-3 text-lg font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {allReady ? 'Start Game' : 'Waiting for everyone to ready up…'}
-        </button>
-      ) : you ? (
-        <button
-          type="button"
-          onClick={() => setPlayerReady(code, you.uid, !you.ready)}
-          className={`w-full rounded-md px-4 py-3 text-lg font-semibold ${
-            you.ready
-              ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-              : 'bg-emerald-600 text-white hover:bg-emerald-700'
-          }`}
-        >
-          {you.ready ? "You're ready — tap to undo" : 'Ready Up'}
-        </button>
-      ) : null}
+      {(isHost || you) && (
+        <div className="fixed inset-x-0 bottom-0 border-t border-gray-200 bg-white/95 px-4 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
+          <div className="mx-auto max-w-2xl">
+            {isHost ? (
+              <button
+                type="button"
+                onClick={() => uid && startGame(code, uid)}
+                disabled={!allReady}
+                className="w-full rounded-md bg-indigo-600 px-4 py-3 text-lg font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {allReady ? 'Start Game' : 'Waiting for everyone to ready up…'}
+              </button>
+            ) : you ? (
+              <button
+                type="button"
+                onClick={() => setPlayerReady(code, you.uid, !you.ready)}
+                className={`w-full rounded-md px-4 py-3 text-lg font-semibold ${
+                  you.ready
+                    ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                    : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                }`}
+              >
+                {you.ready ? "You're ready — tap to undo" : 'Ready Up'}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
